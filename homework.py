@@ -9,7 +9,7 @@ import requests
 import telegram
 from dotenv import load_dotenv
 
-from exceptions import EnvVariableException
+from exceptions import EnvVariableException, InvalidResponseCodeException
 
 load_dotenv()
 
@@ -36,7 +36,7 @@ formatter = logging.Formatter(
 handler = logging.StreamHandler(stream=sys.stdout)
 handler.setFormatter(formatter)
 file_handler = RotatingFileHandler(
-    f'{__file__}.log', maxBytes=50000, backupCount=3
+    f'{__file__}.log', maxBytes=50000, backupCount=3, encoding='utf-8'
 )
 file_handler.setFormatter(formatter)
 logger.addHandler(handler)
@@ -90,24 +90,16 @@ def get_api_answer(timestamp):
     logger.debug(f'Начало запроса {request_info}')
     try:
         response = requests.get(**request_data)
-        response.raise_for_status()
-        status_code = response.status_code
-        if status_code == HTTPStatus.OK:
-            answer = response.json()
-            return answer
-        else:
-            raise ConnectionError(
-                (f'Получен не верный код HTTP ответа при запросе '
-                 f'{request_info}. Код статуса: {status_code}')
-            )
-    except requests.HTTPError as error:
-        raise ConnectionError(
-            (f'Получен не верный HTTP ответ при запросе {request_info}. '
-             f'Ошибка: {error}')
-        )
     except requests.RequestException as error:
         raise ConnectionError(
             f'Не получен ответ при запросе {request_info}. Ошибка: {error}')
+    status_code = response.status_code
+    if status_code != HTTPStatus.OK:
+        raise InvalidResponseCodeException(
+            (f'Получен не верный код HTTP ответа при запросе '
+             f'{request_info}. Код статуса: {status_code}')
+        )
+    return response.json()
 
 
 def check_response(response):
@@ -133,7 +125,7 @@ def parse_status(homework):
         raise KeyError('В аргументе отсутствует ключ: `status`.')
     status = homework['status']
     if status not in HOMEWORK_VERDICTS:
-        raise KeyError('Недокументированный статус работы.')
+        raise ValueError('Недокументированный статус работы.')
     verdict = HOMEWORK_VERDICTS[status]
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
@@ -144,7 +136,6 @@ def main():
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     timestamp = int(time.time())
     previous_message = ''
-    previous_error = ''
 
     while True:
         try:
@@ -153,18 +144,16 @@ def main():
             homeworks = api_answer.get('homeworks')
             if homeworks:
                 message = parse_status(homeworks[0])
-                if previous_message != message:
-                    if send_message(bot, message):
-                        timestamp = api_answer.get('current_date', timestamp)
-                        previous_message = message
+                if previous_message != message and send_message(bot, message):
+                    timestamp = api_answer.get('current_date', timestamp)
+                    previous_message = message
             else:
                 logger.debug('Новые статусы отсутствуют.')
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
             logger.exception(error)
-            if previous_error != error:
-                if send_message(bot, message):
-                    previous_error = error
+            if previous_message != error and send_message(bot, message):
+                previous_message = error
         finally:
             time.sleep(RETRY_PERIOD)
 
